@@ -1,0 +1,15 @@
+# Java / Maven
+erp-server/target/
+*.class
+
+# Node / Vue
+erp-web/node_modules/
+erp-web/dist/
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.idea/
+*.iml
+

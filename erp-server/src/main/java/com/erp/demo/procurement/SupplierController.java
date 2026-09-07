@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -25,18 +26,21 @@ public class SupplierController {
     }
 
     @GetMapping
+    @PreAuthorize("hasAuthority('base:supplier:list')")
     public List<Supplier> findAll(@RequestParam(required = false) String keyword,
                                   @RequestParam(required = false) String status) {
         return supplierService.findAll(keyword, status);
     }
 
     @PostMapping
+    @PreAuthorize("hasAuthority('base:supplier:manage')")
     @ResponseStatus(HttpStatus.CREATED)
     public Supplier create(@Valid @RequestBody SupplierRequest request) {
         return supplierService.create(request);
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasAuthority('base:supplier:manage')")
     public Supplier update(@PathVariable Long id, @Valid @RequestBody SupplierRequest request) {
         return supplierService.update(id, request);
     }

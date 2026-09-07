@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.security.access.prepost.PreAuthorize;
 
 import java.util.List;
 
@@ -23,22 +24,26 @@ public class PurchaseReceiptController {
     }
 
     @GetMapping
+    @PreAuthorize("hasAuthority('purchase:receipt:list')")
     public List<PurchaseReceipt> findAll() {
         return purchaseService.findReceipts();
     }
 
     @GetMapping("/{id}")
+    @PreAuthorize("hasAuthority('purchase:receipt:list')")
     public PurchaseReceipt findById(@PathVariable Long id) {
         return purchaseService.findReceipt(id);
     }
 
     @PostMapping
+    @PreAuthorize("hasAuthority('purchase:receipt:confirm')")
     @ResponseStatus(HttpStatus.CREATED)
     public PurchaseReceipt create(@Valid @RequestBody PurchaseReceiptRequest request) {
         return purchaseService.createReceipt(request);
     }
 
     @PostMapping("/{id}/confirm")
+    @PreAuthorize("hasAuthority('purchase:receipt:confirm')")
     public PurchaseReceipt confirm(@PathVariable Long id) {
         return purchaseService.confirmReceipt(id);
     }

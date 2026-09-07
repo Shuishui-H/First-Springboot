@@ -2,8 +2,13 @@ package com.erp.demo.procurement;
 
 import com.erp.demo.product.Product;
 import com.erp.demo.product.ProductService;
+import com.erp.demo.warehouse.WarehouseService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
@@ -26,12 +31,22 @@ public class PurchaseService {
     private final AtomicLong nextReceiptId = new AtomicLong(5001);
     private final ProductService productService;
     private final SupplierService supplierService;
+    private final WarehouseService warehouseService;
+    private final JdbcTemplate jdbcTemplate;
     private final List<PurchaseOrder> orders = new ArrayList<>();
     private final List<PurchaseReceipt> receipts = new ArrayList<>();
 
-    public PurchaseService(ProductService productService, SupplierService supplierService) {
+    public PurchaseService(ProductService productService, SupplierService supplierService, WarehouseService warehouseService) {
+        this(productService, supplierService, warehouseService, null);
+    }
+
+    @Autowired
+    public PurchaseService(ProductService productService, SupplierService supplierService, WarehouseService warehouseService,
+                           ObjectProvider<JdbcTemplate> jdbcTemplateProvider) {
         this.productService = productService;
         this.supplierService = supplierService;
+        this.warehouseService = warehouseService;
+        this.jdbcTemplate = jdbcTemplateProvider == null ? null : jdbcTemplateProvider.getIfAvailable();
         Product paper = productService.findById(1L);
         Product pen = productService.findById(2L);
         orders.add(new PurchaseOrder(3001L, "PO20260903-0001", 1001L, "上海优采办公用品有限公司",
@@ -44,6 +59,12 @@ public class PurchaseService {
     }
 
     public synchronized List<PurchaseOrder> findOrders(String keyword, String status) {
+        if (relationalDataAvailable()) {
+            String query = keyword == null ? "" : keyword.trim().toLowerCase();
+            return jdbcTemplate.query("SELECT id FROM pur_purchase_order ORDER BY id DESC", (rs, row) -> rs.getLong(1)).stream().map(this::readOrder)
+                    .filter(order -> query.isBlank() || order.orderNo().toLowerCase().contains(query) || order.supplierName().toLowerCase().contains(query))
+                    .filter(order -> status == null || status.isBlank() || "全部状态".equals(status) || status.equals(order.status())).toList();
+        }
         String query = keyword == null ? "" : keyword.trim().toLowerCase();
         return orders.stream()
                 .filter(order -> query.isBlank() || order.orderNo().toLowerCase().contains(query)
@@ -55,11 +76,14 @@ public class PurchaseService {
     }
 
     public synchronized PurchaseOrder findOrder(Long id) {
+        if (relationalDataAvailable()) return readOrder(id);
         return orders.stream().filter(order -> order.id().equals(id)).findFirst()
                 .orElseThrow(() -> notFound("采购订单不存在"));
     }
 
+    @Transactional
     public synchronized PurchaseOrder create(PurchaseOrderRequest request) {
+        if (relationalDataAvailable()) return createRelational(request);
         validateDate(request.orderDate(), request.expectedArrivalDate());
         Supplier supplier = enabledSupplier(request.supplierId());
         List<PurchaseOrderItem> items = buildItems(request.items());
@@ -71,6 +95,7 @@ public class PurchaseService {
     }
 
     public synchronized PurchaseOrder update(Long id, PurchaseOrderRequest request) {
+        if (relationalDataAvailable()) return updateRelational(id, request);
         PurchaseOrder current = findOrder(id);
         assertStatus(current, "草稿", "已驳回");
         validateDate(request.orderDate(), request.expectedArrivalDate());
@@ -84,12 +109,18 @@ public class PurchaseService {
     }
 
     public synchronized void delete(Long id) {
+        if (relationalDataAvailable()) {
+            PurchaseOrder current = findOrder(id); assertStatus(current, "草稿");
+            jdbcTemplate.update("DELETE FROM pur_purchase_order WHERE id = ?", id);
+            return;
+        }
         PurchaseOrder current = findOrder(id);
         assertStatus(current, "草稿");
         orders.remove(current);
     }
 
     public synchronized PurchaseOrder submit(Long id) {
+        if (relationalDataAvailable()) return updateStatusRelational(id, "待审核", null, "草稿", "已驳回");
         PurchaseOrder current = findOrder(id);
         assertStatus(current, "草稿", "已驳回");
         PurchaseOrder submitted = replaceStatus(current, "待审核", null);
@@ -98,6 +129,7 @@ public class PurchaseService {
     }
 
     public synchronized PurchaseOrder approve(Long id, String comment) {
+        if (relationalDataAvailable()) return updateStatusRelational(id, "已审核", blankToNull(comment), "待审核");
         PurchaseOrder current = findOrder(id);
         assertStatus(current, "待审核");
         PurchaseOrder approved = replaceStatus(current, "已审核", blankToNull(comment));
@@ -106,6 +138,10 @@ public class PurchaseService {
     }
 
     public synchronized PurchaseOrder reject(Long id, String comment) {
+        if (relationalDataAvailable()) {
+            if (comment == null || comment.isBlank()) throw badRequest("驳回时必须填写审核意见");
+            return updateStatusRelational(id, "已驳回", comment.trim(), "待审核");
+        }
         PurchaseOrder current = findOrder(id);
         assertStatus(current, "待审核");
         if (comment == null || comment.isBlank()) {
@@ -117,6 +153,11 @@ public class PurchaseService {
     }
 
     public synchronized PurchaseOrder voidOrder(Long id, String comment) {
+        if (relationalDataAvailable()) {
+            PurchaseOrder current = findOrder(id);
+            if (!Set.of("草稿", "已驳回", "待审核", "已审核").contains(current.status()) || current.receivedQuantity() > 0) throw conflict("当前采购订单已发生入库，不能作废");
+            return updateStatusRelational(id, "已作废", blankToNull(comment), "草稿", "已驳回", "待审核", "已审核");
+        }
         PurchaseOrder current = findOrder(id);
         if (!Set.of("草稿", "已驳回", "待审核", "已审核").contains(current.status()) || current.receivedQuantity() > 0) {
             throw conflict("当前采购订单已发生入库，不能作废");
@@ -127,19 +168,24 @@ public class PurchaseService {
     }
 
     public synchronized List<PurchaseOrder> findReceivableOrders() {
+        if (relationalDataAvailable()) return findOrders(null, "已审核").stream().filter(order -> order.pendingQuantity() > 0).toList();
         return orders.stream().filter(order -> order.status().equals("已审核") && order.pendingQuantity() > 0).toList();
     }
 
     public synchronized List<PurchaseReceipt> findReceipts() {
+        if (relationalDataAvailable()) return jdbcTemplate.query("SELECT id FROM wh_purchase_receipt ORDER BY id DESC", (rs, row) -> rs.getLong(1)).stream().map(this::readReceipt).toList();
         return receipts.stream().sorted((left, right) -> Long.compare(right.id(), left.id())).toList();
     }
 
     public synchronized PurchaseReceipt findReceipt(Long id) {
+        if (relationalDataAvailable()) return readReceipt(id);
         return receipts.stream().filter(receipt -> receipt.id().equals(id)).findFirst()
                 .orElseThrow(() -> notFound("采购入库单不存在"));
     }
 
+    @Transactional
     public synchronized PurchaseReceipt createReceipt(PurchaseReceiptRequest request) {
+        if (relationalDataAvailable()) return createReceiptRelational(request);
         PurchaseOrder order = findOrder(request.purchaseOrderId());
         assertStatus(order, "已审核");
         if (request.items().stream().map(PurchaseReceiptRequest.Item::purchaseOrderItemId).distinct().count()
@@ -167,7 +213,9 @@ public class PurchaseService {
         return receipt;
     }
 
+    @Transactional
     public synchronized PurchaseReceipt confirmReceipt(Long id) {
+        if (relationalDataAvailable()) return confirmReceiptRelational(id);
         PurchaseReceipt current = findReceipt(id);
         assertStatus(current.status(), "草稿");
         PurchaseOrder order = findOrder(current.purchaseOrderId());
@@ -181,6 +229,8 @@ public class PurchaseService {
                 throw conflict("当前订单剩余未入库数量不足，请刷新后重试");
             }
             productService.increaseStock(receiptItem.productId(), receiptItem.receivedQuantity());
+            warehouseService.recordBusinessMovement(current.warehouseId(), receiptItem.productId(), receiptItem.receivedQuantity(),
+                    true, "采购入库", current.receiptNo(), current.remark());
             updatedItems.set(index, new PurchaseOrderItem(source.id(), source.productId(), source.sku(), source.productName(),
                     source.unit(), source.orderedQuantity(), source.receivedQuantity() + receiptItem.receivedQuantity(),
                     source.unitPrice(), source.lineAmount()));
@@ -215,6 +265,99 @@ public class PurchaseService {
         }
         return items;
     }
+
+    private PurchaseOrder createRelational(PurchaseOrderRequest request) {
+        validateDate(request.orderDate(), request.expectedArrivalDate());
+        Supplier supplier = enabledSupplier(request.supplierId());
+        List<PurchaseOrderItem> items = buildItems(request.items());
+        long id = jdbcTemplate.queryForObject("SELECT COALESCE(MAX(id), 3000) + 1 FROM pur_purchase_order", Long.class);
+        jdbcTemplate.update("INSERT INTO pur_purchase_order (id, order_no, supplier_id, supplier_name, order_date, expected_arrival_date, status, total_quantity, total_amount, remark, created_by, updated_by) VALUES (?, ?, ?, ?, ?, ?, '草稿', ?, ?, ?, 0, 0)",
+                id, nextOrderNo(id), supplier.id(), supplier.name(), request.orderDate(), request.expectedArrivalDate(), totalQuantity(items), totalAmount(items), request.remark());
+        for (PurchaseOrderItem item : items) jdbcTemplate.update("INSERT INTO pur_purchase_order_item (purchase_order_id, product_id, sku, product_name, unit, ordered_quantity, received_quantity, unit_price, line_amount) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                id, item.productId(), item.sku(), item.productName(), item.unit(), item.orderedQuantity(), item.unitPrice(), item.lineAmount());
+        return readOrder(id);
+    }
+
+    private PurchaseOrder updateRelational(Long id, PurchaseOrderRequest request) {
+        PurchaseOrder current = findOrder(id); assertStatus(current, "草稿", "已驳回");
+        validateDate(request.orderDate(), request.expectedArrivalDate());
+        Supplier supplier = enabledSupplier(request.supplierId());
+        List<PurchaseOrderItem> items = buildItems(request.items());
+        jdbcTemplate.update("UPDATE pur_purchase_order SET supplier_id = ?, supplier_name = ?, order_date = ?, expected_arrival_date = ?, total_quantity = ?, total_amount = ?, remark = ?, updated_by = 0 WHERE id = ?",
+                supplier.id(), supplier.name(), request.orderDate(), request.expectedArrivalDate(), totalQuantity(items), totalAmount(items), request.remark(), id);
+        jdbcTemplate.update("DELETE FROM pur_purchase_order_item WHERE purchase_order_id = ?", id);
+        for (PurchaseOrderItem item : items) jdbcTemplate.update("INSERT INTO pur_purchase_order_item (purchase_order_id, product_id, sku, product_name, unit, ordered_quantity, received_quantity, unit_price, line_amount) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                id, item.productId(), item.sku(), item.productName(), item.unit(), item.orderedQuantity(), item.unitPrice(), item.lineAmount());
+        return readOrder(id);
+    }
+
+    private PurchaseOrder updateStatusRelational(Long id, String target, String comment, String... allowed) {
+        PurchaseOrder current = findOrder(id); assertStatus(current, allowed);
+        int changed = jdbcTemplate.update("UPDATE pur_purchase_order SET status = ?, approval_comment = ?, submitted_at = CASE WHEN ? = '待审核' THEN CURRENT_TIMESTAMP ELSE submitted_at END, approved_at = CASE WHEN ? = '已审核' THEN CURRENT_TIMESTAMP ELSE approved_at END, approved_by = CASE WHEN ? = '已审核' THEN 0 ELSE approved_by END, updated_by = 0 WHERE id = ? AND status = ?",
+                target, comment, target, target, target, id, current.status());
+        if (changed != 1) throw conflict("采购订单状态已变化，请刷新后重试");
+        return readOrder(id);
+    }
+
+    private PurchaseReceipt createReceiptRelational(PurchaseReceiptRequest request) {
+        PurchaseOrder order = findOrder(request.purchaseOrderId());
+        assertStatus(order, "已审核");
+        if (request.items().stream().map(PurchaseReceiptRequest.Item::purchaseOrderItemId).distinct().count() != request.items().size()) throw badRequest("入库明细不能重复商品");
+        List<PurchaseReceipt.Item> items = request.items().stream().map(item -> {
+            PurchaseOrderItem source = order.items().stream().filter(orderItem -> orderItem.id().equals(item.purchaseOrderItemId())).findFirst().orElseThrow(() -> badRequest("入库明细不是当前采购订单的商品"));
+            if (item.receivedQuantity() > source.pendingQuantity()) throw conflict("入库数量超过订单未入库数量");
+            return new PurchaseReceipt.Item(item.purchaseOrderItemId(), item.purchaseOrderItemId(), source.productId(), source.productName(), item.receivedQuantity());
+        }).toList();
+        long id = jdbcTemplate.queryForObject("SELECT COALESCE(MAX(id), 5000) + 1 FROM wh_purchase_receipt", Long.class);
+        String no = "IN" + LocalDate.now().format(ORDER_DATE_FORMAT) + "-" + String.format("%04d", id - 5000);
+        jdbcTemplate.update("INSERT INTO wh_purchase_receipt (id, receipt_no, purchase_order_id, purchase_order_no, warehouse_id, warehouse_name, stock_in_date, status, total_quantity, remark, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, '草稿', ?, ?, 0)",
+                id, no, order.id(), order.orderNo(), request.warehouseId(), request.warehouseName() == null || request.warehouseName().isBlank() ? warehouseService.findWarehouse(request.warehouseId()).name() : request.warehouseName(), request.stockInDate(), items.stream().mapToInt(PurchaseReceipt.Item::receivedQuantity).sum(), request.remark());
+        for (PurchaseReceipt.Item item : items) jdbcTemplate.update("INSERT INTO wh_purchase_receipt_item (purchase_receipt_id, purchase_order_item_id, product_id, product_name, unit, received_quantity) VALUES (?, ?, ?, ?, ?, ?)",
+                id, item.purchaseOrderItemId(), item.productId(), item.productName(), order.items().stream().filter(line -> line.id().equals(item.purchaseOrderItemId())).findFirst().orElseThrow().unit(), item.receivedQuantity());
+        return readReceipt(id);
+    }
+
+    private PurchaseReceipt confirmReceiptRelational(Long id) {
+        PurchaseReceipt current = findReceipt(id); assertStatus(current.status(), "草稿");
+        PurchaseOrder order = findOrder(current.purchaseOrderId()); assertStatus(order, "已审核");
+        for (PurchaseReceipt.Item receiptItem : current.items()) {
+            PurchaseOrderItem source = order.items().stream().filter(item -> item.id().equals(receiptItem.purchaseOrderItemId())).findFirst().orElseThrow(() -> badRequest("采购订单明细不存在"));
+            if (receiptItem.receivedQuantity() > source.pendingQuantity()) throw conflict("当前订单剩余未入库数量不足，请刷新后重试");
+            warehouseService.recordBusinessMovement(current.warehouseId(), receiptItem.productId(), receiptItem.receivedQuantity(), true, "采购入库", current.receiptNo(), current.remark());
+            jdbcTemplate.update("UPDATE pur_purchase_order_item SET received_quantity = received_quantity + ? WHERE id = ? AND received_quantity + ? <= ordered_quantity", receiptItem.receivedQuantity(), source.id(), receiptItem.receivedQuantity());
+        }
+        PurchaseOrder after = readOrder(order.id());
+        jdbcTemplate.update("UPDATE pur_purchase_order SET status = ?, updated_by = 0 WHERE id = ?", after.items().stream().allMatch(item -> item.pendingQuantity() == 0) ? "已完成" : "已审核", order.id());
+        if (jdbcTemplate.update("UPDATE wh_purchase_receipt SET status = '已确认', confirmed_at = CURRENT_TIMESTAMP, confirmed_by = 0 WHERE id = ? AND status = '草稿'", id) != 1)
+            throw conflict("入库单状态已变化，请刷新后重试");
+        return readReceipt(id);
+    }
+
+    private PurchaseOrder readOrder(Long id) {
+        List<PurchaseOrder> rows = jdbcTemplate.query("SELECT id, order_no, supplier_id, supplier_name, order_date, expected_arrival_date, status, total_quantity, total_amount, remark, approval_comment FROM pur_purchase_order WHERE id = ?",
+                (rs, row) -> new PurchaseOrder(rs.getLong("id"), rs.getString("order_no"), rs.getLong("supplier_id"), rs.getString("supplier_name"), rs.getDate("order_date").toLocalDate(), rs.getDate("expected_arrival_date") == null ? null : rs.getDate("expected_arrival_date").toLocalDate(), rs.getString("status"), rs.getInt("total_quantity"), rs.getBigDecimal("total_amount"), rs.getString("remark"), rs.getString("approval_comment"), readOrderItems(id)), id);
+        if (rows.isEmpty()) throw notFound("采购订单不存在");
+        return rows.get(0);
+    }
+
+    private List<PurchaseOrderItem> readOrderItems(Long id) {
+        return jdbcTemplate.query("SELECT id, product_id, sku, product_name, unit, ordered_quantity, received_quantity, unit_price, line_amount FROM pur_purchase_order_item WHERE purchase_order_id = ? ORDER BY id",
+                (rs, row) -> new PurchaseOrderItem(rs.getLong("id"), rs.getLong("product_id"), rs.getString("sku"), rs.getString("product_name"), rs.getString("unit"), rs.getInt("ordered_quantity"), rs.getInt("received_quantity"), rs.getBigDecimal("unit_price"), rs.getBigDecimal("line_amount")), id);
+    }
+
+    private PurchaseReceipt readReceipt(Long id) {
+        List<PurchaseReceipt> rows = jdbcTemplate.query("SELECT id, receipt_no, purchase_order_id, purchase_order_no, warehouse_id, warehouse_name, stock_in_date, status, total_quantity, remark FROM wh_purchase_receipt WHERE id = ?",
+                (rs, row) -> new PurchaseReceipt(rs.getLong("id"), rs.getString("receipt_no"), rs.getLong("purchase_order_id"), rs.getString("purchase_order_no"), rs.getLong("warehouse_id"), rs.getString("warehouse_name"), rs.getDate("stock_in_date").toLocalDate(), rs.getString("status"), rs.getInt("total_quantity"), rs.getString("remark"), readReceiptItems(id)), id);
+        if (rows.isEmpty()) throw notFound("采购入库单不存在");
+        return rows.get(0);
+    }
+
+    private List<PurchaseReceipt.Item> readReceiptItems(Long id) {
+        return jdbcTemplate.query("SELECT id, purchase_order_item_id, product_id, product_name, received_quantity FROM wh_purchase_receipt_item WHERE purchase_receipt_id = ? ORDER BY id",
+                (rs, row) -> new PurchaseReceipt.Item(rs.getLong("id"), rs.getLong("purchase_order_item_id"), rs.getLong("product_id"), rs.getString("product_name"), rs.getInt("received_quantity")), id);
+    }
+
+    private boolean relationalDataAvailable() { return jdbcTemplate != null && jdbcTemplate.queryForObject("SELECT COUNT(*) FROM md_supplier", Integer.class) > 0; }
 
     private Supplier enabledSupplier(Long id) {
         Supplier supplier = supplierService.findById(id);
@@ -283,4 +426,11 @@ public class PurchaseService {
     private ResponseStatusException conflict(String message) {
         return new ResponseStatusException(HttpStatus.CONFLICT, message);
     }
+
+    public synchronized State exportState() { return new State(List.copyOf(orders), List.copyOf(receipts), nextOrderId.get(), nextItemId.get(), nextReceiptId.get()); }
+    public synchronized void restoreState(State state) {
+        orders.clear(); orders.addAll(state.orders()); receipts.clear(); receipts.addAll(state.receipts());
+        nextOrderId.set(state.nextOrderId()); nextItemId.set(state.nextItemId()); nextReceiptId.set(state.nextReceiptId());
+    }
+    public record State(List<PurchaseOrder> orders, List<PurchaseReceipt> receipts, long nextOrderId, long nextItemId, long nextReceiptId) {}
 }

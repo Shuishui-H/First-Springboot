@@ -1,7 +1,20 @@
 spring:
   application:
     name: erp-server
+  profiles:
+    default: mysql
 
 server:
   port: 8080
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        same-site: lax
 
+erp:
+  auth:
+    # 本地演示默认启用；正式部署必须通过环境变量覆盖初始密码。
+    enabled: ${ERP_AUTH_ENABLED:true}
+    initial-admin-username: ${ERP_INITIAL_ADMIN_USERNAME:admin}
+    initial-admin-password: ${ERP_INITIAL_ADMIN_PASSWORD:NovaERP@2026}

@@ -10,6 +10,6 @@ erp-web/dist/
 .env
 .env.*
 !.env.example
+erp-server/src/main/resources/application-local.yml
 .idea/
 *.iml
-

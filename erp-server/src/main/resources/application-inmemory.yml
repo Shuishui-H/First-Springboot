@@ -1,0 +1,12 @@
+# V1 兼容配置：未提供 MySQL 参数时仍可运行现有内存演示服务。
+# 启用 MySQL 持久化请以 --spring.profiles.active=mysql 启动，并配置 DB_PASSWORD。
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+
+erp:
+  auth:
+    enabled: false

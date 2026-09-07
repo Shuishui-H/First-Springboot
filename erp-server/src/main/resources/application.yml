@@ -17,4 +17,6 @@ erp:
     # 本地演示默认启用；正式部署必须通过环境变量覆盖初始密码。
     enabled: ${ERP_AUTH_ENABLED:true}
     initial-admin-username: ${ERP_INITIAL_ADMIN_USERNAME:admin}
-    initial-admin-password: ${ERP_INITIAL_ADMIN_PASSWORD:NovaERP@2026}
+    initial-admin-password: ${ERP_INITIAL_ADMIN_PASSWORD:admin123}
+    # 课堂演示时校准内置账号密码；正式环境可设置 ERP_DEMO_ACCOUNTS_RESET=false。
+    demo-accounts-reset: ${ERP_DEMO_ACCOUNTS_RESET:true}

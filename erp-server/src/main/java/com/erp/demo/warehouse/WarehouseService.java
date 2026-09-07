@@ -604,6 +604,16 @@ public class WarehouseService {
     private String nextFlowNo(long id, boolean inbound) { return (inbound ? "IN" : "OUT") + LocalDateTime.now().format(FLOW_DATE_FORMAT) + "-" + String.format("%05d", id - 9000); }
     private String nextTransferNo(long id) { return "TRF" + LocalDate.now().format(FLOW_DATE_FORMAT) + "-" + String.format("%05d", id); }
     private String nextStocktakeNo(long id) { return "STK" + LocalDate.now().format(FLOW_DATE_FORMAT) + "-" + String.format("%05d", id); }
+    private String sourceType(String businessType) {
+        return switch (businessType) {
+            case "采购入库" -> "PURCHASE";
+            case "销售出库" -> "SALE";
+            case "销售退货" -> "SALE_RETURN";
+            case "仓库调入", "仓库调出" -> "TRANSFER";
+            case "盘盈调整", "盘亏调整" -> "STOCKTAKE";
+            default -> "MANUAL";
+        };
+    }
     private void assertCodeAvailable(String code, Long currentId) {
         if (warehouses.stream().anyMatch(item -> item.code().equalsIgnoreCase(code.trim()) && !item.id().equals(currentId))) throw conflict("仓库编码已存在");
     }
